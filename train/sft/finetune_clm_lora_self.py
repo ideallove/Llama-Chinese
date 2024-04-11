@@ -68,6 +68,8 @@ from transformers.utils.versions import require_version
 
 import pdb
 
+from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.27.0.dev0")
@@ -80,6 +82,7 @@ logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
+from typing import Dict, List
 
 @dataclass
 class ModelArguments:
@@ -265,6 +268,45 @@ class SavePeftModelCallback(TrainerCallback):
                 os.remove(pytorch_model_path)
             return control
 
+def smart_tokenizer_and_embedding_resize(
+        new_tokens: List[str],  # 待添加到tokenizer的新标记列表
+        special_tokens_dict: Dict,  # 待添加的特殊标记字典
+        tokenizer: transformers.PreTrainedTokenizer,  # 预训练的tokenizer
+        model: transformers.PreTrainedModel,  # 预训练的模型
+):
+    """
+    Resize tokenizer and embedding.
+    Note: This is the unoptimized version that may make your embedding size not be divisible by 64.
+    """
+    # 向tokenizer中添加新标记，并返回添加的标记数量
+    num_new_tokens = tokenizer.add_tokens(new_tokens)
+    # 向tokenizer中添加特殊标记，并返回添加的特殊标记数量
+    num_new_special_tokens = tokenizer.add_special_tokens(special_tokens_dict)
+    # 调整模型的嵌入层大小以匹配新的标记数量
+    model.resize_token_embeddings(len(tokenizer))
+    #阅读
+    # 计算新添加的总标记数量（普通标记+特殊标记）
+    total_new_tokens = num_new_tokens + num_new_special_tokens
+
+    # 如果有新添加的标记
+    if total_new_tokens > 0:
+        # 获取模型的输入嵌入层权重数据
+        input_embeddings = model.get_input_embeddings().weight.data
+        # 获取模型的输出嵌入层权重数据
+        output_embeddings = model.get_output_embeddings().weight.data
+
+        # 计算已有输入嵌入层的平均权重（不包括新添加的标记）
+        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+        # 计算已有输出嵌入层的平均权重（不包括新添加的标记）
+        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+
+        # 将新添加的输入标记的嵌入层权重设置为平均值
+        input_embeddings[-num_new_tokens:] = input_embeddings_avg
+        # 将新添加的输出标记的嵌入层权重设置为平均值
+        output_embeddings[-num_new_tokens:] = output_embeddings_avg
+
+
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -273,7 +315,7 @@ def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     # pdb.set_trace()
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # If we pass only one argument to the script and it's the path to a json file,
+        # If we pass only one argument to the script, and it's the path to a json file,
         # let's parse it to get our arguments.
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
@@ -407,18 +449,26 @@ def main():
         "use_fast": model_args.use_fast_tokenizer,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
-        "padding_side":'left'
+        "padding_side": 'right'
     }
     if model_args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.tokenizer_name,
+            trust_remote_code=True,
+            use_fast=False,
+            **tokenizer_kwargs)
     elif model_args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.model_name_or_path,
+            trust_remote_code=True,
+            use_fast=False,
+            **tokenizer_kwargs)
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
-    tokenizer.pad_token = tokenizer.eos_token
+    # tokenizer.pad_token = tokenizer.eos_token
     lora_config = LoraConfig(
         r=model_args.lora_r,
         lora_alpha=model_args.lora_alpha,
@@ -468,6 +518,25 @@ def main():
         n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
         logger.info(f"Training new model from scratch - Total size={n_params/2**20:.2f}M params")
 
+    SEP = '<SEP>'
+    BOP = '<PATH>'
+    EOP = '</PATH>'
+    # Add new tokens
+    # 添加新的特殊令牌
+    special_tokens_dict = dict()    # 创建一个空字典用于存储特殊令牌
+    # 如果分词器中没有定义填充令牌(pad_token)，则添加一个
+    if tokenizer.pad_token is None:
+        special_tokens_dict['pad_token'] = '<PAD>'
+    # 定义一组新的令牌
+    new_tokens = [SEP, BOP, EOP]
+    # 如果根据命令行参数script_args.add_rel_token需要添加关系令牌，则调用函数load_new_tokens
+    # 这个函数可能从文件script_args.rel_dict_path中加载额外的令牌，并更新new_tokens列表
+    # if model_args.add_rel_token:
+    #     new_tokens = load_new_tokens(new_tokens, model_args.rel_dict_path)
+    # 调用smart_tokenizer_and_embedding_resize函数来智能地调整分词器和模型嵌入的大小
+    # 这个函数添加新的令牌，并相应地更新分词器和模型的嵌入层
+    smart_tokenizer_and_embedding_resize(new_tokens, special_tokens_dict, tokenizer, model)
+
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
     embedding_size = model.get_input_embeddings().weight.shape[0]
@@ -478,25 +547,26 @@ def main():
     elif model_args.load_in_bits==4:
         model = prepare_model_for_kbit_training(model)
 
-    # Preprocessing the datasets.
-    # First we tokenize all the texts.
-    if training_args.do_train:
-        column_names = list(raw_datasets["train"].features)
+    # 预处理数据集。
+    # 首先我们对所有文本进行分词。
+    if training_args.do_train:  # 如果设置了训练标志
+        column_names = list(raw_datasets["train"].features) # 获取训练集的特征名称列表
     else:
-        column_names = list(raw_datasets["validation"].features)
+        column_names = list(raw_datasets["validation"].features)    # 否则获取验证集的特征名称列表
 
-    train_on_inputs = True
-    if len(column_names)==1:
-        text_column_name = "text" if "text" in column_names else column_names[0]
-    elif len(column_names)==2:
-        input_column_name = 'input' if 'input' in column_names else column_names[0]
-        target_column_name = 'target' if 'target' in column_names else column_names[0]
-        train_on_inputs=False
+    train_on_inputs = True  # 设置一个标志，表示是否基于输入进行训练
+    # 根据特征名称的数量决定如何设置列名称
+    if len(column_names)==1:  # 如果只有一个特征列
+        text_column_name = "text" if "text" in column_names else column_names[0]  # 尝试使用'text'作为列名，否则使用唯一的列名
+    elif len(column_names)==2:  # 如果有两个特征列
+        input_column_name = 'input' if 'input' in column_names else column_names[0]  # 尝试使用'input'作为输入列名，否则使用第一个列名
+        target_column_name = 'target' if 'target' in column_names else column_names[1]  # 尝试使用'target'作为目标列名，否则使用第二个列名
+        train_on_inputs=False  # 如果有两列，则不基于输入进行训练
     else:
-        raise ValueError('输入文件列数不对')
-    print('train_on_inputs',train_on_inputs)
-    # since this will be pickled to avoid _LazyModule error in Hasher force logger loading before tokenize_function
-    tok_logger = transformers.utils.logging.get_logger("transformers.tokenization_utils_base")
+        raise ValueError('输入文件列数不对')    # 如果列数不是1或2，抛出值错误
+    print('train_on_inputs',train_on_inputs)    # 打印是否基于输入进行训练的标志
+    # 由于这会被序列化以避免在Hasher中的_LazyModule错误，在分词函数之前强制加载日志器
+    tok_logger = transformers.utils.logging.get_logger("transformers.tokenization_utils_base")  # 获取用于分词的日志器
 
     def tokenize_function(examples):
         with CaptureLogger(tok_logger) as cl:
@@ -582,7 +652,7 @@ def main():
         def compute_metrics(eval_preds):
             preds, labels = eval_preds
             # preds have the same shape as the labels, after the argmax(-1) has been calculated
-            # by preprocess_logits_for_metrics but we need to shift the labels
+            # by preprocess_logits_for_metrics, but we need to shift the labels
             labels = labels[:, 1:].reshape(-1)
             # .reshape(-1)
             preds = preds[:, :-1].reshape(-1)
@@ -606,17 +676,23 @@ def main():
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
+    # Prepare instruct tuning 准备指令微调
+    response_template = "[/INST]"   # 定义响应模板，可能是用于指令微调的标记
+    # 创建一个专门为仅完成语言模型(CompletionOnlyLM)准备的数据整理器(DataCollatorForCompletionOnlyLM)
+    # 该数据整理器处理数据的批处理，mlm=False表示不是使用掩码语言模型的方式进行训练
+    data_collator = DataCollatorForCompletionOnlyLM(
+        response_template, tokenizer=tokenizer, mlm=False
+    )
+
     # Initialize our Trainer
-    trainer = Trainer(
+    trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         # Data collator will default to DataCollatorWithPadding, so we change it.
-        data_collator=transformers.DataCollatorForSeq2Seq(
-            tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
-        ),
+        data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.do_eval and not is_torch_tpu_available() else None,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics if training_args.do_eval and not is_torch_tpu_available()else None,
         callbacks=([SavePeftModelCallback] if isinstance(model, PeftModel) else None),
