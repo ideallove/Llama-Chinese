@@ -1,4 +1,4 @@
-output_model=/data/models/finetune_lora_self2
+output_model=/data/models/llama-chinese_save_models/finetune_lora_self3
 DATASET_LIST="
 /data/datasets/joint_training_new2_json/align/cwq/cwq_train.json
 /data/datasets/joint_training_new2_json/align/webqsp/webqsp_train.json

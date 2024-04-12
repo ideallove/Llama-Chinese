@@ -32,7 +32,7 @@ from typing import Optional,List,Union
 import datasets
 import evaluate
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from peft import (  # noqa: E402
     LoraConfig,
     PeftModel,
@@ -392,31 +392,34 @@ def main():
         if extension == "txt":
             extension = "text"
             dataset_args["keep_linebreaks"] = data_args.keep_linebreaks
-        raw_datasets = load_dataset(
-            extension,
-            data_files=data_files,
-            cache_dir=os.path.join(training_args.output_dir,'dataset_cache'),
-            use_auth_token=True if model_args.use_auth_token else None,
-            **dataset_args,
-        )
-        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
-        if "validation" not in raw_datasets.keys():
-            raw_datasets["validation"] = load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[:{data_args.validation_split_percentage}%]",
-                cache_dir=model_args.cache_dir,
-                use_auth_token=True if model_args.use_auth_token else None,
-                **dataset_args,
-            )
-            raw_datasets["train"] = load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[{data_args.validation_split_percentage}%:]",
-                cache_dir=model_args.cache_dir,
-                use_auth_token=True if model_args.use_auth_token else None,
-                **dataset_args,
-            )
+        # 加载数据集
+        dataset_list = [load_dataset('json', data_files=p, split="train") for p in data_args.train_files]
+        raw_datasets = concatenate_datasets(dataset_list)
+        # raw_datasets = load_dataset(
+        #     extension,
+        #     data_files=data_files,
+        #     cache_dir=os.path.join(training_args.output_dir,'dataset_cache'),
+        #     use_auth_token=True if model_args.use_auth_token else None,
+        #     **dataset_args,
+        # )
+        # # If no validation data is there, validation_split_percentage will be used to divide the dataset.
+        # if "validation" not in raw_datasets.keys():
+        #     raw_datasets["validation"] = load_dataset(
+        #         extension,
+        #         data_files=data_files,
+        #         split=f"train[:{data_args.validation_split_percentage}%]",
+        #         cache_dir=model_args.cache_dir,
+        #         use_auth_token=True if model_args.use_auth_token else None,
+        #         **dataset_args,
+        #     )
+        #     raw_datasets["train"] = load_dataset(
+        #         extension,
+        #         data_files=data_files,
+        #         split=f"train[{data_args.validation_split_percentage}%:]",
+        #         cache_dir=model_args.cache_dir,
+        #         use_auth_token=True if model_args.use_auth_token else None,
+        #         **dataset_args,
+        #     )
 
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
@@ -446,7 +449,7 @@ def main():
 
     tokenizer_kwargs = {
         "cache_dir": model_args.cache_dir,
-        "use_fast": model_args.use_fast_tokenizer,
+        # "use_fast": model_args.use_fast_tokenizer,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
         "padding_side": 'right'
@@ -549,10 +552,15 @@ def main():
 
     # 预处理数据集。
     # 首先我们对所有文本进行分词。
-    if training_args.do_train:  # 如果设置了训练标志
-        column_names = list(raw_datasets["train"].features) # 获取训练集的特征名称列表
-    else:
-        column_names = list(raw_datasets["validation"].features)    # 否则获取验证集的特征名称列表
+    # if training_args.do_train:  # 如果设置了训练标志
+    #     column_names = list(raw_datasets["train"].features) # 获取训练集的特征名称列表
+    # else:
+    #     column_names = list(raw_datasets["validation"].features)    # 否则获取验证集的特征名称列表
+
+    column_names = list(raw_datasets["text"])
+    print("=====column_names=====")
+    print(column_names)
+    print("=====column_names=====")
 
     train_on_inputs = True  # 设置一个标志，表示是否基于输入进行训练
     # 根据特征名称的数量决定如何设置列名称
@@ -685,7 +693,7 @@ def main():
     )
 
     # Initialize our Trainer
-    trainer = SFTTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
