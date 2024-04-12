@@ -1,21 +1,24 @@
-output_model=/data/models/finetune_lora_self
+output_model=/data/models/finetune_lora_self2
+DATASET_LIST="
+/data/datasets/joint_training_new2_json/align/cwq/cwq_train.json
+/data/datasets/joint_training_new2_json/align/webqsp/webqsp_train.json
+/data/datasets/joint_training_new2_json/ExplainQAData/cwq/cwq_train_1000.json
+/data/datasets/joint_training_new2_json/ExplainQAData/webqsp/webqsp_train_1000.json
+"
 # 需要修改到自己的输入目录
 if [ ! -d ${output_model} ];then
     mkdir ${output_model}
 fi
-cp ./finetune.sh ${output_model}
-deepspeed --include localhost:0 finetune_clm_lora.py \
+cp ./finetune_lora_self.sh ${output_model}
+deepspeed --include localhost:0 finetune_clm_lora_self.py \
     --model_name_or_path /home/dyf/model/Llama-2-7b-chat-hf \
-    --train_files ../../data/train_sft.csv \
-    --validation_files  ../../data/dev_sft.csv \
-                         ../../data/dev_sft_sharegpt.csv \
-    --per_device_train_batch_size 12 \
-    --per_device_eval_batch_size 2 \
+    --train_files ${DATASET_LIST} \
+    --per_device_train_batch_size 1 \
+    --per_device_eval_batch_size 1 \
     --do_train \
-    --do_eval \
     --use_fast_tokenizer false \
     --output_dir ${output_model} \
-    --evaluation_strategy  steps \
+    --evaluation_strategy steps \
     --max_eval_samples 800 \
     --learning_rate 1e-4 \
     --gradient_accumulation_steps 8 \
